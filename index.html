@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Кар-Карыч: Летающий Смешарик</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; font-family: "Segoe UI", Verdana, Arial, sans-serif; background: #aee3ff; }
+  #game { position: fixed; inset: 0; display: block; }
+
+  .overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    background: rgba(15, 40, 90, 0.45);
+    backdrop-filter: blur(3px);
+    z-index: 10;
+    color: #fff;
+    transition: opacity 0.25s ease;
+  }
+  .overlay.hidden { display: none; }
+
+  .card {
+    background: rgba(255, 255, 255, 0.95);
+    color: #1e3a6e;
+    border-radius: 20px;
+    padding: 34px 44px;
+    max-width: 460px;
+    width: calc(100% - 40px);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  }
+
+  h1 { font-size: 44px; color: #2f6fe0; text-shadow: 0 2px 0 #fff; margin-bottom: 4px; }
+  .subtitle { font-size: 18px; color: #5b7bb0; margin-bottom: 22px; }
+
+  .hint {
+    background: #eef4ff;
+    border-radius: 12px;
+    padding: 14px 18px;
+    font-size: 16px;
+    line-height: 1.55;
+    color: #24426e;
+    margin-bottom: 24px;
+  }
+  .hint b { color: #2f6fe0; }
+
+  button {
+    font-size: 20px;
+    font-family: inherit;
+    font-weight: 700;
+    color: #fff;
+    background: linear-gradient(180deg, #4a9bff, #2f6fe0);
+    border: none;
+    border-radius: 14px;
+    padding: 14px 40px;
+    cursor: pointer;
+    box-shadow: 0 6px 0 #1f4eab, 0 8px 18px rgba(31, 78, 171, 0.4);
+    transition: transform 0.08s ease, box-shadow 0.08s ease;
+  }
+  button:hover { filter: brightness(1.06); }
+  button:active { transform: translateY(4px); box-shadow: 0 2px 0 #1f4eab, 0 4px 10px rgba(31, 78, 171, 0.4); }
+
+  .score-line { font-size: 22px; margin: 10px 0; }
+  .score-line span { font-weight: 800; color: #2f6fe0; }
+
+  #newRecord {
+    display: none;
+    font-size: 22px;
+    font-weight: 800;
+    color: #d9822b;
+    background: #fff3d6;
+    border-radius: 12px;
+    padding: 8px 18px;
+    margin-top: 4px;
+    margin-bottom: 16px;
+  }
+
+  .foot { font-size: 13px; color: #7d93b8; margin-top: 18px; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div class="overlay" id="startScreen">
+  <div class="card">
+    <h1>Кар-Карыч</h1>
+    <div class="subtitle">Летающий Смешарик</div>
+    <div class="hint">
+      <b>&uarr; / W</b> — лететь вверх<br>
+      <b>&darr; / S</b> — лететь вниз<br>
+      Уворачивайся от камней, брёвен и грозовых туч!
+    </div>
+    <button id="startBtn">Начать игру</button>
+    <div class="foot">или нажми ПРОБЕЛ</div>
+  </div>
+</div>
+
+<div class="overlay hidden" id="gameOverScreen">
+  <div class="card">
+    <h1>Игра окончена</h1>
+    <div class="score-line">Очки: <span id="finalScore">0</span></div>
+    <div class="score-line">Рекорд: <span id="finalBest">0</span></div>
+    <div id="newRecord">Новый рекорд!</div>
+    <button id="restartBtn">Играть снова</button>
+    <div class="foot">или нажми ПРОБЕЛ</div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var canvas = document.getElementById('game');
+  var ctx = canvas.getContext('2d');
+
+  var STORE_KEY = 'karychRecord';
+
+  var W = 0;
+  var H = 0;
+  var GROUND_Y = 40;
+
+  function resize() {
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = W;
+    canvas.height = H;
+    bird.y = Math.max(GROUND_Y + bird.r, Math.min(H - GROUND_Y - bird.r, bird.y));
+  }
+
+  function loadBest() {
+    try {
+      var v = parseInt(localStorage.getItem(STORE_KEY), 10);
+      return v > 0 ? v : 0;
+    } catch (e) { return 0; }
+  }
+  function saveBest(v) {
+    try { localStorage.setItem(STORE_KEY, String(v)); } catch (e) { /* ignore */ }
+  }
+
+  var state = {
+    mode: 'start',
+    t: 0,
+    score: 0,
+    elapsed: 0,
+    spawnTimer: 1.1,
+    speed: 300,
+    best: loadBest(),
+    isNew: false
+  };
+
+  var bird = { x: 150, y: 300, r: 30, vy: 0, speed: 340 };
+
+  var birdImg = new Image();
+  birdImg.src = 'Karl_Karlovich.png';
+
+  var keys = { up: false, down: false };
+  var obstacles = [];
+
+  var bgClouds = [];
+  function makeCloud() {
+    return {
+      x: Math.random() * (W + 300) - 150,
+      y: 30 + Math.random() * (H * 0.45),
+      s: 0.6 + Math.random() * 1.3,
+      v: 8 + Math.random() * 16,
+      o: 0.3 + Math.random() * 0.35
+    };
+  }
+  for (var i = 0; i < 9; i++) bgClouds.push(makeCloud());
+
+  var cityHeights = [];
+  for (var j = 0; j < 30; j++) cityHeights.push(28 + Math.random() * 72);
+  var cityOffset = 0;
+
+  function reset() {
+    obstacles.length = 0;
+    bird.y = H / 2;
+    bird.vy = 0;
+    state.score = 0;
+    state.elapsed = 0;
+    state.spawnTimer = 1.1;
+    state.speed = 300;
+    state.isNew = false;
+  }
+
+  function startGame() {
+    reset();
+    state.mode = 'play';
+    hideScreens();
+  }
+
+  function gameOver() {
+    state.mode = 'over';
+    var s = Math.floor(state.score);
+    var wasBest = state.best;
+    state.isNew = s > 0 && s > wasBest;
+    if (state.isNew) {
+      state.best = s;
+      saveBest(s);
+    }
+    document.getElementById('finalScore').textContent = s;
+    document.getElementById('finalBest').textContent = state.best;
+    document.getElementById('newRecord').style.display = state.isNew ? 'block' : 'none';
+    showScreen('gameOverScreen');
+  }
+
+  function hideScreens() {
+    document.getElementById('startScreen').classList.add('hidden');
+    document.getElementById('gameOverScreen').classList.add('hidden');
+  }
+  function showScreen(id) {
+    var el = document.getElementById(id);
+    document.querySelectorAll('.overlay').forEach(function (o) { o.classList.add('hidden'); });
+    el.classList.remove('hidden');
+  }
+
+  document.getElementById('startBtn').addEventListener('click', startGame);
+  document.getElementById('restartBtn').addEventListener('click', startGame);
+
+  window.addEventListener('keydown', function (e) {
+    var code = e.code;
+    if (code === 'ArrowUp' || code === 'KeyW') {
+      keys.up = true;
+      if (state.mode !== 'play') startGame();
+    } else if (code === 'ArrowDown' || code === 'KeyS') {
+      keys.down = true;
+      if (state.mode !== 'play') startGame();
+    } else if (code === 'Space' || code === 'Enter') {
+      if (state.mode !== 'play') startGame();
+    }
+    if (code === 'ArrowUp' || code === 'ArrowDown' || code === 'Space') e.preventDefault();
+  });
+
+  window.addEventListener('keyup', function (e) {
+    var code = e.code;
+    if (code === 'ArrowUp' || code === 'KeyW') keys.up = false;
+    else if (code === 'ArrowDown' || code === 'KeyS') keys.down = false;
+  });
+
+  window.addEventListener('resize', resize);
+
+  // ---------- helpers ----------
+  function rr(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function circleRect(cx, cy, cr, rx, ry, rw, rh) {
+    var nx = Math.max(rx, Math.min(cx, rx + rw));
+    var ny = Math.max(ry, Math.min(cy, ry + rh));
+    var dx = cx - nx;
+    var dy = cy - ny;
+    return dx * dx + dy * dy < cr * cr;
+  }
+
+  // ---------- gameplay ----------
+  function spawnObstacle() {
+    var bottomLimit = H - GROUND_Y;
+    var roll = Math.random();
+    var o;
+    if (roll < 0.4) {
+      var w1 = 56 + Math.random() * 20;
+      var h1 = 56 + Math.random() * 24;
+      o = { type: 'rock', x: W + 40, y: 70 + Math.random() * (bottomLimit - 70 - h1 - 20), w: w1, h: h1, seed: Math.random() * 100 };
+    } else if (roll < 0.7) {
+      var w2 = 60 + Math.random() * 24;
+      var h2 = 34 + Math.random() * 14;
+      o = { type: 'log', x: W + 40, y: 70 + Math.random() * (bottomLimit - 70 - h2 - 20), w: w2, h: h2, seed: Math.random() * 100 };
+    } else {
+      o = { type: 'cloud', x: W + 60, y: 60 + Math.random() * (bottomLimit - 60 - 88 - 20), w: 110, h: 88 };
+    }
+    obstacles.push(o);
+  }
+
+  function update(dt) {
+    for (var c = 0; c < bgClouds.length; c++) {
+      var cl = bgClouds[c];
+      cl.x -= cl.v * dt;
+      if (cl.x < -180) {
+        cl.x = W + 180;
+        cl.y = 30 + Math.random() * (H * 0.45);
+        cl.s = 0.6 + Math.random() * 1.3;
+      }
+    }
+    cityOffset += state.speed * dt * 0.12;
+    if (cityOffset > 120) cityOffset -= 120;
+
+    if (state.mode !== 'play') return;
+
+    state.elapsed += dt;
+    state.speed = Math.min(300 + state.elapsed * 12, 780);
+    state.score += state.speed * dt * 0.02;
+
+    if (keys.up) bird.vy = -bird.speed;
+    else if (keys.down) bird.vy = bird.speed;
+    else bird.vy = 0;
+
+    bird.y += bird.vy * dt;
+    bird.y = Math.max(GROUND_Y + bird.r, Math.min(H - GROUND_Y - bird.r, bird.y));
+
+    state.spawnTimer -= dt;
+    if (state.spawnTimer <= 0) {
+      spawnObstacle();
+      state.spawnTimer = Math.max(0.5, 1.3 - state.elapsed * 0.02);
+    }
+
+    for (var i = obstacles.length - 1; i >= 0; i--) {
+      var o = obstacles[i];
+      o.x -= state.speed * dt * (o.type === 'cloud' ? 0.85 : 1);
+      if (o.x + o.w < -60) {
+        obstacles.splice(i, 1);
+        continue;
+      }
+      if (circleRect(bird.x, bird.y, bird.r * 0.75, o.x, o.y, o.w, o.h)) {
+        gameOver();
+        return;
+      }
+    }
+  }
+
+  // ---------- drawing ----------
+  function drawSky() {
+    var g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#aee3ff');
+    g.addColorStop(1, '#e9f9ff');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function drawGround() {
+    var base = H - GROUND_Y;
+    var g = ctx.createLinearGradient(0, base, 0, H);
+    g.addColorStop(0, '#7ec850');
+    g.addColorStop(1, '#4d9a3a');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, base, W, GROUND_Y);
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.fillRect(0, base, W, 3);
+    ctx.strokeStyle = 'rgba(0,0,0,0.06)';
+    ctx.lineWidth = 1;
+    for (var x = 6; x < W; x += 46) {
+      ctx.beginPath();
+      ctx.moveTo(x, base + 12);
+      ctx.lineTo(x + 16, base + 12);
+      ctx.stroke();
+    }
+  }
+
+  function drawCity() {
+    var base = H - GROUND_Y;
+    var bw = 120;
+    var start = -(cityOffset % bw);
+    var x = start - bw;
+    var i = 0;
+    ctx.fillStyle = 'rgba(140, 185, 220, 0.5)';
+    while (x < W + bw) {
+      var idx = ((i % cityHeights.length) + cityHeights.length) % cityHeights.length;
+      var hh = cityHeights[idx];
+      rr(x + 8, base - hh, bw - 16, hh, 5);
+      ctx.fill();
+      x += bw;
+      i++;
+    }
+  }
+
+  function drawBgClouds() {
+    for (var i = 0; i < bgClouds.length; i++) {
+      var cl = bgClouds[i];
+      ctx.globalAlpha = cl.o;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(cl.x, cl.y, 26 * cl.s, 0, Math.PI * 2);
+      ctx.arc(cl.x + 22 * cl.s, cl.y - 8 * cl.s, 20 * cl.s, 0, Math.PI * 2);
+      ctx.arc(cl.x + 42 * cl.s, cl.y + 2 * cl.s, 18 * cl.s, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawRock(o) {
+    ctx.save();
+    ctx.translate(o.x, o.y);
+    ctx.fillStyle = '#9aa4b0';
+    rr(0, 0, o.w, o.h, 12);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.beginPath();
+    ctx.ellipse(o.w * 0.3, o.h * 0.22, o.w * 0.2, o.h * 0.13, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,0.12)';
+    rr(0, o.h * 0.6, o.w, o.h * 0.4, 10);
+    ctx.fill();
+    ctx.fillStyle = '#7d8894';
+    ctx.beginPath();
+    ctx.moveTo(o.w * 0.5, 2);
+    ctx.lineTo(o.w * 0.62, o.h * 0.3);
+    ctx.lineTo(o.w * 0.4, o.h * 0.28);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawLog(o) {
+    ctx.save();
+    ctx.translate(o.x, o.y);
+    ctx.fillStyle = '#a06a2f';
+    rr(0, 0, o.w, o.h, 9);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,0.12)';
+    rr(o.w * 0.28, 1, 8, o.h - 2, 4);
+    ctx.fill();
+    rr(o.w * 0.56, 1, 6, o.h - 2, 3);
+    ctx.fill();
+    var er = o.h * 0.5;
+    ctx.fillStyle = '#c8914a';
+    ctx.beginPath();
+    ctx.arc(9, o.h / 2, er, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(120,70,20,0.7)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(9, o.h / 2, er * 0.65, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(9, o.h / 2, er * 0.32, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawStormCloud(o) {
+    ctx.save();
+    var cx = o.x + o.w / 2;
+    var topY = o.y + 8;
+    ctx.fillStyle = '#4b5161';
+    ctx.beginPath();
+    ctx.arc(cx - o.w * 0.28, topY + 14, o.w * 0.3, 0, Math.PI * 2);
+    ctx.arc(cx + o.w * 0.28, topY + 12, o.w * 0.3, 0, Math.PI * 2);
+    ctx.arc(cx, topY + 24, o.w * 0.38, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#5b6273';
+    ctx.beginPath();
+    ctx.arc(cx - o.w * 0.12, topY + 4, o.w * 0.22, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffd54a';
+    ctx.beginPath();
+    var lx = cx + 6;
+    ctx.moveTo(lx - 8, topY + 34);
+    ctx.lineTo(lx + 8, topY + 34);
+    ctx.lineTo(lx - 2, topY + 48);
+    ctx.lineTo(lx + 10, topY + 48);
+    ctx.lineTo(lx - 4, topY + 70);
+    ctx.lineTo(lx - 2, topY + 52);
+    ctx.lineTo(lx - 12, topY + 52);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawObstacles() {
+    for (var i = 0; i < obstacles.length; i++) {
+      var o = obstacles[i];
+      if (o.type === 'rock') drawRock(o);
+      else if (o.type === 'log') drawLog(o);
+      else drawStormCloud(o);
+    }
+  }
+
+  function drawBird() {
+    if (birdImg.complete && birdImg.naturalWidth > 0) {
+      drawBirdImage();
+    } else {
+      drawBirdPainted();
+    }
+  }
+
+  function drawBirdImage() {
+    var R = bird.r;
+    var size = R * 2.5;
+    var bob = Math.sin(state.t * 9) * 2.5;
+    var tilt = bird.vy / bird.speed;
+    if (tilt > 0.25) tilt = 0.25;
+    if (tilt < -0.25) tilt = -0.25;
+
+    ctx.save();
+    ctx.translate(bird.x, bird.y + bob);
+    ctx.rotate(tilt);
+    ctx.drawImage(birdImg, -size / 2, -size / 2, size, size);
+    ctx.restore();
+  }
+
+  function drawBirdPainted() {
+    var t = state.t;
+    var R = bird.r;
+    var x = bird.x;
+    var y = bird.y;
+
+    ctx.save();
+    ctx.translate(x, y);
+
+    var flap = Math.sin(t * 10) * 5;
+
+    // wings (behind the body)
+    ctx.fillStyle = '#3f8ef0';
+    ctx.beginPath();
+    ctx.ellipse(-R * 0.6, -4 + flap, 12, 19, -0.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(R * 0.55, -4 - flap, 12, 19, 0.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // body
+    var g = ctx.createRadialGradient(-R * 0.3, -R * 0.3, R * 0.2, 0, 0, R);
+    g.addColorStop(0, '#6db7ff');
+    g.addColorStop(1, '#2f6fe0');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, R, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(25,55,130,0.55)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // face (clipped to the round body)
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(0, 0, R, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.fillStyle = '#fdfaf2';
+    ctx.beginPath();
+    ctx.arc(R * 0.42, -R * 0.16, R * 0.72, 0, Math.PI * 2);
+    ctx.fill();
+
+    var blink = Math.sin(t * 1.4 + 2) > 0.97;
+    drawEye(R * 0.32, -R * 0.24, R * 0.115, R * 0.16, blink);
+    drawEye(R * 0.63, -R * 0.14, R * 0.1, R * 0.14, blink);
+    ctx.restore();
+
+    // big yellow beak
+    ctx.fillStyle = '#f7bc10';
+    ctx.beginPath();
+    ctx.ellipse(-R * 0.3, R * 0.16, R * 0.68, R * 0.5, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(120,80,10,0.45)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // open mouth
+    ctx.fillStyle = '#fff3c4';
+    ctx.beginPath();
+    ctx.ellipse(-R * 0.32, R * 0.3, R * 0.42, R * 0.11, -0.15, 0, Math.PI * 2);
+    ctx.fill();
+
+    // pink scarf
+    ctx.fillStyle = '#f5638f';
+    ctx.beginPath();
+    ctx.ellipse(-R * 0.1, R * 0.55, R * 0.62, R * 0.22, -0.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-R * 0.55, R * 0.48);
+    ctx.quadraticCurveTo(-R * 0.92, R * 0.7, -R * 0.82, R * 1.05);
+    ctx.lineTo(-R * 0.58, R * 0.9);
+    ctx.quadraticCurveTo(-R * 0.55, R * 0.62, -R * 0.42, R * 0.6);
+    ctx.closePath();
+    ctx.fill();
+
+    // pink crest
+    ctx.fillStyle = '#f5638f';
+    ctx.beginPath();
+    ctx.moveTo(-R * 0.45, -R * 0.85);
+    ctx.quadraticCurveTo(-R * 0.8, -R * 1.3, -R * 0.2, -R * 1.32);
+    ctx.quadraticCurveTo(-R * 0.5, -R * 0.95, -R * 0.05, -R * 1.02);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawEye(ex, ey, rx, ry, blink) {
+    ctx.fillStyle = '#2b2f45';
+    if (blink) {
+      ctx.beginPath();
+      ctx.ellipse(ex, ey, rx, 1.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+    ctx.beginPath();
+    ctx.ellipse(ex, ey, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(ex + rx * 0.3, ey - ry * 0.35, Math.max(1.5, rx * 0.32), 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawHud() {
+    ctx.fillStyle = 'rgba(20,40,80,0.85)';
+    ctx.font = 'bold 26px "Segoe UI", Arial, sans-serif';
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'left';
+    ctx.fillText('\u041e\u0447\u043a\u0438: ' + Math.floor(state.score), 16, 12);
+    ctx.textAlign = 'right';
+    ctx.fillText('\u0420\u0435\u043a\u043e\u0440\u0434: ' + state.best, W - 16, 12);
+  }
+
+  function draw() {
+    drawSky();
+    drawCity();
+    drawGround();
+    drawBgClouds();
+    if (state.mode === 'play' || state.mode === 'over') drawObstacles();
+    drawBird();
+    drawHud();
+  }
+
+  // ---------- loop ----------
+  var last = performance.now();
+
+  function frame(now) {
+    var dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    state.t += dt;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
